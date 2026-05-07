@@ -37,6 +37,59 @@ ENVIRONMENTS = {
     "staging": "https://tdl.apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest",
     "production": "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest",
 }
+USPS_STATE_FIPS = {
+    "AL": "01",
+    "AK": "02",
+    "AZ": "04",
+    "AR": "05",
+    "CA": "06",
+    "CO": "08",
+    "CT": "09",
+    "DE": "10",
+    "DC": "11",
+    "FL": "12",
+    "GA": "13",
+    "HI": "15",
+    "ID": "16",
+    "IL": "17",
+    "IN": "18",
+    "IA": "19",
+    "KS": "20",
+    "KY": "21",
+    "LA": "22",
+    "ME": "23",
+    "MD": "24",
+    "MA": "25",
+    "MI": "26",
+    "MN": "27",
+    "MS": "28",
+    "MO": "29",
+    "MT": "30",
+    "NE": "31",
+    "NV": "32",
+    "NH": "33",
+    "NJ": "34",
+    "NM": "35",
+    "NY": "36",
+    "NC": "37",
+    "ND": "38",
+    "OH": "39",
+    "OK": "40",
+    "OR": "41",
+    "PA": "42",
+    "RI": "44",
+    "SC": "45",
+    "SD": "46",
+    "TN": "47",
+    "TX": "48",
+    "UT": "49",
+    "VT": "50",
+    "VA": "51",
+    "WA": "53",
+    "WV": "54",
+    "WI": "55",
+    "WY": "56",
+}
 
 
 @dataclass
@@ -54,6 +107,7 @@ class Config:
     filter_ugc_codes: set[str] = field(default_factory=set)
     filter_event_codes: set[str] = field(default_factory=set)
     filter_severities: set[str] = field(default_factory=set)
+    filter_states: set[str] = field(default_factory=set)
     language: str = "en"
     message_prefix: str = "IPAWS"
     max_message_length: int = 200
@@ -103,6 +157,7 @@ def load_config() -> Config:
         filter_ugc_codes=parse_csv_set(os.getenv("IPAWS_FILTER_UGC_CODES", "")),
         filter_event_codes=parse_csv_set(os.getenv("IPAWS_FILTER_EVENT_CODES", "")),
         filter_severities=parse_csv_set(os.getenv("IPAWS_FILTER_SEVERITIES", "")),
+        filter_states=parse_state_filter(os.getenv("IPAWS_FILTER_STATES", "")),
         language=os.getenv("IPAWS_LANGUAGE", "en").lower(),
         message_prefix=os.getenv("IPAWS_MESSAGE_PREFIX", "IPAWS"),
         max_message_length=int(os.getenv("MESHTASTIC_MAX_MESSAGE_LENGTH", "200")),
@@ -117,6 +172,18 @@ def load_config() -> Config:
 
 def parse_csv_set(value: str) -> set[str]:
     return {item.strip().upper() for item in value.split(",") if item.strip()}
+
+
+def parse_state_filter(value: str) -> set[str]:
+    states = parse_csv_set(value)
+    unknown_states = states - set(USPS_STATE_FIPS)
+    if unknown_states:
+        raise ValueError(
+            "Unsupported IPAWS_FILTER_STATES value(s): "
+            + ", ".join(sorted(unknown_states))
+            + ". Use two-letter USPS state abbreviations, such as AZ."
+        )
+    return states
 
 
 def feed_url(config: Config) -> str:
@@ -246,6 +313,8 @@ def parse_datetime(value: str) -> datetime | None:
 
 
 def matches_filters(alert: Alert, config: Config) -> bool:
+    if config.filter_states and not matches_state_filter(alert, config.filter_states):
+        return False
     if config.filter_same_codes and not alert.same_codes.intersection(config.filter_same_codes):
         return False
     if config.filter_ugc_codes and not alert.ugc_codes.intersection(config.filter_ugc_codes):
@@ -255,6 +324,29 @@ def matches_filters(alert: Alert, config: Config) -> bool:
     if config.filter_severities and alert.severity.upper() not in config.filter_severities:
         return False
     return True
+
+
+def matches_state_filter(alert: Alert, states: set[str]) -> bool:
+    state_fips_codes = {USPS_STATE_FIPS[state] for state in states}
+    if any(same_code_state(code) in state_fips_codes for code in alert.same_codes):
+        return True
+    if any(ugc_code_state(code) in states for code in alert.ugc_codes):
+        return True
+    return False
+
+
+def same_code_state(code: str) -> str:
+    normalized = code.strip()
+    if len(normalized) == 6 and normalized.isdigit():
+        return normalized[1:3]
+    return ""
+
+
+def ugc_code_state(code: str) -> str:
+    normalized = code.strip().upper()
+    if len(normalized) >= 2 and normalized[:2].isalpha():
+        return normalized[:2]
+    return ""
 
 
 def load_state(path: Path) -> dict:

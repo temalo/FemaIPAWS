@@ -97,6 +97,9 @@ Examples:
 # Maricopa County, AZ SAME code
 IPAWS_FILTER_SAME_CODES=004013
 
+# All Arizona alerts with SAME or UGC geocodes
+IPAWS_FILTER_STATES=AZ
+
 # Only extreme and severe alerts
 IPAWS_FILTER_SEVERITIES=EXTREME,SEVERE
 
