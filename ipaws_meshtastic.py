@@ -383,16 +383,20 @@ def format_alert_message(alert: Alert, config: Config) -> str:
     summary = first_parameter(alert, "CMAMtext") or first_parameter(alert, "CMAMlongtext")
     summary = summary or alert.headline or alert.description or alert.event
 
-    parts = [
-        config.message_prefix,
-        alert.event,
-        alert.severity,
-        alert.area,
-        summary,
+    details = [
+        f"Event: {alert.event}",
+        f"Headline: {alert.headline}",
+        f"Description: {alert.description}",
+        f"Instructions: {alert.instruction}",
+        f"Area: {alert.area}",
+        f"Severity: {alert.severity}",
+        f"Urgency: {alert.urgency}",
+        f"Certainty: {alert.certainty}",
     ]
-    message = " | ".join(part for part in parts if part)
+    details = [d for d in details if d.split(': ', 1)[1]]
+    message = f"{config.message_prefix} ALERT\n" + "\n".join(details)
     message = ascii_clean(message)
-    return truncate(message, config.max_message_length)
+    return message
 
 
 def first_parameter(alert: Alert, name: str) -> str:
@@ -438,8 +442,16 @@ def send_messages(messages: list[str], config: Config) -> bool:
             interface = meshtastic.serial_interface.SerialInterface(devPath=config.serial_port)
 
         for index, message in enumerate(messages, start=1):
-            logging.info("Sending alert %s/%s to channel %s", index, len(messages), config.channel)
-            interface.sendText(message, channelIndex=config.channel)
+            # Split long messages into chunks
+            chunks = [message[i:i+config.max_message_length] for i in range(0, len(message), config.max_message_length)]
+            for chunk_idx, chunk in enumerate(chunks, start=1):
+                logging.info(
+                    "Sending alert %s/%s (chunk %s/%s) to channel %s",
+                    index, len(messages), chunk_idx, len(chunks), config.channel
+                )
+                interface.sendText(chunk, channelIndex=config.channel)
+                if chunk_idx < len(chunks):
+                    time.sleep(config.send_delay_seconds)
             if index < len(messages):
                 time.sleep(config.send_delay_seconds)
         return True
