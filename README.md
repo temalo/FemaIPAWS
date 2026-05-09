@@ -87,6 +87,61 @@ entry:
 Use an absolute `IPAWS_STATE_FILE` path for cron, and make sure the cron user can
 read/write that path and access the Meshtastic serial device.
 
+## Log Maintenance
+
+The repo includes a helper script to back up the current log file and truncate it
+so the active log stays manageable:
+
+```bash
+chmod +x /opt/FemaIPAWS/scripts/backup_and_truncate_log.sh
+```
+
+Set these defaults in your `.env` file:
+
+```ini
+IPAWS_LOG_FILE=/var/log/ipaws_meshtastic.log
+IPAWS_LOG_BACKUP_DIR=/var/backups/ipaws-meshtastic-logs
+IPAWS_LOG_RETENTION_DAYS=14
+```
+
+By default the script rotates this log path:
+
+```text
+/var/log/ipaws_meshtastic.log
+```
+
+and stores timestamped backups here:
+
+```text
+/var/backups/ipaws-meshtastic-logs
+```
+
+Backups older than `IPAWS_LOG_RETENTION_DAYS` are removed after each run. Set the
+value to `0` if you want to keep backups indefinitely.
+
+You can also override the log path, backup directory, and retention days when
+invoking the script:
+
+```bash
+/opt/FemaIPAWS/scripts/backup_and_truncate_log.sh /var/log/ipaws_meshtastic.log /var/backups/ipaws-meshtastic-logs 14
+```
+
+To run it from cron every night at 00:15, add a second crontab entry:
+
+```cron
+15 0 * * * /opt/FemaIPAWS/scripts/backup_and_truncate_log.sh >> /var/log/ipaws_meshtastic_maintenance.log 2>&1
+```
+
+Edit the crontab with:
+
+```bash
+crontab -e
+```
+
+Make sure the cron user can read and truncate the source log, and can write to the
+backup directory and maintenance log path. The script automatically loads
+`/opt/FemaIPAWS/.env` when it exists, so the cron entry can stay short.
+
 ## Filtering
 
 Leave filters blank to relay all active alerts from the chosen feed.
