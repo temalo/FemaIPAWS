@@ -104,6 +104,9 @@ IPAWS_LOG_BACKUP_DIR=/var/backups/ipaws-meshtastic-logs
 IPAWS_LOG_RETENTION_DAYS=14
 ```
 
+The script also recognizes `LOG_FILE`, `BACKUP_DIR`, `IPAWS_BACKUP_DIR`, and
+`LOG_RETENTION_DAYS` as fallback names for older deployments.
+
 By default the script rotates this log path:
 
 ```text
@@ -139,8 +142,16 @@ crontab -e
 ```
 
 Make sure the cron user can read and truncate the source log, and can write to the
-backup directory and maintenance log path. The script automatically loads
-`/opt/FemaIPAWS/.env` when it exists, so the cron entry can stay short.
+backup directory and maintenance log path. The script automatically looks for a
+dotenv file in these locations, in order:
+
+1. `IPAWS_ENV_FILE` if set
+2. `/opt/FemaIPAWS/.env`
+3. `/opt/FemaIPAWS/scripts/.env`
+4. the current working directory's `.env`
+
+That makes it easier to run from cron or from a copied deployment layout while
+still keeping the cron entry short.
 
 ## Filtering
 
