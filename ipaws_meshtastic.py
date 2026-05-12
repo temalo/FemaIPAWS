@@ -8,6 +8,7 @@ configured Meshtastic channel. Designed to be run periodically by cron.
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -117,6 +118,12 @@ class Config:
     tcp_host: str = "192.168.1.100"
     channel: int = 0
     send_enabled: bool = True
+    geocode_enabled: bool = True
+    geocode_url: str = "https://nominatim.openstreetmap.org/reverse"
+    geocode_user_agent: str = "ipaws-meshtastic/1.0 (https://github.com/tedmalone/FemaIPAWS)"
+    geocode_zoom: int = 14
+    geocode_timeout_seconds: int = 10
+    geocode_cache_size: int = 500
 
 
 @dataclass
@@ -139,6 +146,8 @@ class Alert:
     ugc_codes: set[str]
     event_codes: set[str]
     parameters: dict[str, list[str]]
+    polygons: list[list[tuple[float, float]]] = field(default_factory=list)
+    circles: list[tuple[float, float, float]] = field(default_factory=list)
 
 
 def load_config() -> Config:
@@ -167,6 +176,15 @@ def load_config() -> Config:
         tcp_host=os.getenv("MESHTASTIC_TCP_HOST", "192.168.1.100"),
         channel=int(os.getenv("MESHTASTIC_CHANNEL", "0")),
         send_enabled=os.getenv("MESHTASTIC_SEND_ENABLED", "true").lower() == "true",
+        geocode_enabled=os.getenv("IPAWS_GEOCODE_ENABLED", "true").lower() == "true",
+        geocode_url=os.getenv("IPAWS_GEOCODE_URL", "https://nominatim.openstreetmap.org/reverse"),
+        geocode_user_agent=os.getenv(
+            "IPAWS_GEOCODE_USER_AGENT",
+            "ipaws-meshtastic/1.0 (https://github.com/tedmalone/FemaIPAWS)",
+        ),
+        geocode_zoom=int(os.getenv("IPAWS_GEOCODE_ZOOM", "14")),
+        geocode_timeout_seconds=int(os.getenv("IPAWS_GEOCODE_TIMEOUT_SECONDS", "10")),
+        geocode_cache_size=int(os.getenv("IPAWS_GEOCODE_CACHE_SIZE", "500")),
     )
 
 
@@ -252,6 +270,8 @@ def alert_from_node(alert_node: ET.Element, info_node: ET.Element) -> Alert:
             parameters.setdefault(name, []).append(value)
 
     area_names = []
+    polygons: list[list[tuple[float, float]]] = []
+    circles: list[tuple[float, float, float]] = []
     for area in info_node.findall("cap:area", CAP_NS):
         area_desc = text(area, "cap:areaDesc")
         if area_desc:
@@ -263,6 +283,14 @@ def alert_from_node(alert_node: ET.Element, info_node: ET.Element) -> Alert:
                 same_codes.add(value.upper())
             if name.upper() == "UGC" and value:
                 ugc_codes.add(value.upper())
+        for polygon_node in area.findall("cap:polygon", CAP_NS):
+            points = parse_polygon(polygon_node.text or "")
+            if points:
+                polygons.append(points)
+        for circle_node in area.findall("cap:circle", CAP_NS):
+            parsed = parse_circle(circle_node.text or "")
+            if parsed:
+                circles.append(parsed)
 
     return Alert(
         identifier=text(alert_node, "cap:identifier"),
@@ -283,7 +311,47 @@ def alert_from_node(alert_node: ET.Element, info_node: ET.Element) -> Alert:
         ugc_codes=ugc_codes,
         event_codes=event_codes,
         parameters=parameters,
+        polygons=polygons,
+        circles=circles,
     )
+
+
+def parse_polygon(value: str) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for pair in value.split():
+        try:
+            lat_str, lon_str = pair.split(",")
+            points.append((float(lat_str), float(lon_str)))
+        except ValueError:
+            continue
+    return points
+
+
+def parse_circle(value: str) -> tuple[float, float, float] | None:
+    parts = value.split()
+    if len(parts) != 2 or "," not in parts[0]:
+        return None
+    try:
+        lat_str, lon_str = parts[0].split(",")
+        return (float(lat_str), float(lon_str), float(parts[1]))
+    except ValueError:
+        return None
+
+
+def alert_centroid(alert: Alert) -> tuple[float, float] | None:
+    if alert.polygons:
+        pts = list(alert.polygons[0])
+        if len(pts) >= 2 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        if not pts:
+            return None
+        lat = sum(p[0] for p in pts) / len(pts)
+        lon = sum(p[1] for p in pts) / len(pts)
+        return (lat, lon)
+    if alert.circles:
+        lat, lon, _ = alert.circles[0]
+        return (lat, lon)
+    return None
 
 
 def text(node: ET.Element, path: str) -> str:
@@ -359,9 +427,13 @@ def load_state(path: Path) -> dict:
         return {"sent_alert_ids": []}
 
 
-def save_state(path: Path, state: dict, cache_size: int) -> None:
+def save_state(path: Path, state: dict, cache_size: int, location_cache_size: int = 500) -> None:
     sent_ids = list(dict.fromkeys(state.get("sent_alert_ids", [])))
     state["sent_alert_ids"] = sent_ids[-cache_size:]
+    location_cache = state.get("location_cache", {})
+    if isinstance(location_cache, dict) and len(location_cache) > location_cache_size:
+        trimmed = list(location_cache.items())[-location_cache_size:]
+        state["location_cache"] = dict(trimmed)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -379,7 +451,7 @@ def new_alerts(alerts: list[Alert], config: Config, state: dict) -> list[Alert]:
     return candidates[:config.max_alerts_per_run]
 
 
-def format_alert_message(alert: Alert, config: Config) -> str:
+def format_alert_message(alert: Alert, config: Config, location_label: str = "") -> str:
     summary = first_parameter(alert, "CMAMtext") or first_parameter(alert, "CMAMlongtext")
     summary = summary or alert.headline or alert.description or alert.event
 
@@ -388,6 +460,7 @@ def format_alert_message(alert: Alert, config: Config) -> str:
         f"Headline: {alert.headline}",
         f"Description: {alert.description}",
         f"Instructions: {alert.instruction}",
+        f"Location: {location_label}",
         f"Area: {alert.area}",
         f"Severity: {alert.severity}",
         f"Urgency: {alert.urgency}",
@@ -402,6 +475,112 @@ def format_alert_message(alert: Alert, config: Config) -> str:
 def first_parameter(alert: Alert, name: str) -> str:
     values = alert.parameters.get(name, [])
     return values[0] if values else ""
+
+
+def reverse_geocode(
+    lat: float,
+    lon: float,
+    config: Config,
+    cache: dict,
+) -> str:
+    key = f"{lat:.4f},{lon:.4f}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    if not config.geocode_enabled:
+        return ""
+    try:
+        response = requests.get(
+            config.geocode_url,
+            params={
+                "format": "jsonv2",
+                "lat": f"{lat:.6f}",
+                "lon": f"{lon:.6f}",
+                "zoom": config.geocode_zoom,
+                "addressdetails": 1,
+            },
+            headers={"User-Agent": config.geocode_user_agent},
+            timeout=config.geocode_timeout_seconds,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (RequestException, ValueError) as exc:
+        logging.warning("Reverse geocode failed for %s,%s: %s", lat, lon, exc)
+        return ""
+    label = format_geocode_label(data, lat, lon)
+    cache[key] = label
+    return label
+
+
+def format_geocode_label(data: dict, lat: float, lon: float) -> str:
+    address = data.get("address", {}) if isinstance(data, dict) else {}
+    specific_locality = (
+        address.get("city")
+        or address.get("town")
+        or address.get("village")
+        or address.get("hamlet")
+        or address.get("suburb")
+        or address.get("neighbourhood")
+    )
+    county = address.get("county")
+    road = address.get("road") or address.get("pedestrian") or address.get("footway")
+    state = state_abbreviation(address)
+
+    if not specific_locality and not road and not county:
+        return f"{lat:.3f},{lon:.3f}"
+
+    if not specific_locality and not road and county:
+        parts = [f"in {county}"]
+        if state:
+            parts.append(state)
+        return ", ".join(parts)
+
+    place_parts = []
+    if road and specific_locality and road != specific_locality:
+        place_parts.append(road)
+    place_parts.append(specific_locality or road)
+    if state:
+        place_parts.append(state)
+    place = ", ".join(p for p in place_parts if p)
+
+    try:
+        target_lat = float(data.get("lat"))
+        target_lon = float(data.get("lon"))
+    except (TypeError, ValueError):
+        return place
+
+    distance_mi, bearing = haversine_and_bearing(lat, lon, target_lat, target_lon)
+    if distance_mi < 0.2:
+        return f"near {place}"
+    return f"{distance_mi:.1f} mi {compass_direction(bearing)} of {place}"
+
+
+def state_abbreviation(address: dict) -> str:
+    iso = address.get("ISO3166-2-lvl4") or address.get("ISO3166-2-lvl5") or ""
+    if iso.startswith("US-") and len(iso) >= 5:
+        return iso[3:5].upper()
+    return ""
+
+
+def haversine_and_bearing(
+    lat1: float, lon1: float, lat2: float, lon2: float,
+) -> tuple[float, float]:
+    radius_mi = 3958.7613
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    distance = 2 * radius_mi * math.asin(math.sqrt(a))
+    y = math.sin(d_lambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(d_lambda)
+    bearing = (math.degrees(math.atan2(y, x)) + 360) % 360
+    return distance, bearing
+
+
+def compass_direction(bearing_degrees: float) -> str:
+    directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return directions[round(bearing_degrees / 45) % 8]
 
 
 def ascii_clean(value: str) -> str:
@@ -490,14 +669,24 @@ def main() -> int:
         logging.error("Could not parse IPAWS XML response: %s", exc)
         return 1
     alerts_to_send = new_alerts(alerts, config, state)
-    messages = [format_alert_message(alert, config) for alert in alerts_to_send]
+    location_cache = state.setdefault("location_cache", {})
+    messages = []
+    for alert in alerts_to_send:
+        centroid = alert_centroid(alert)
+        location_label = ""
+        if centroid is not None:
+            lat, lon = centroid
+            location_label = reverse_geocode(lat, lon, config, location_cache)
+            if not location_label:
+                location_label = f"{lat:.3f},{lon:.3f}"
+        messages.append(format_alert_message(alert, config, location_label))
 
     success = send_messages(messages, config)
     if success and config.send_enabled:
         sent_ids = state.setdefault("sent_alert_ids", [])
         sent_ids.extend(alert.identifier for alert in alerts_to_send)
         state["last_success_utc"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        save_state(config.state_file, state, config.sent_cache_size)
+        save_state(config.state_file, state, config.sent_cache_size, config.geocode_cache_size)
 
     return 0 if success else 1
 

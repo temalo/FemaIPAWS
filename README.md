@@ -11,6 +11,9 @@ configuration, serial/TCP Meshtastic support, and a dry-run mode for testing.
 - Polls FEMA IPAWS staging or production feeds.
 - Supports `public`, `wea`, `eas`, `nwem`, and `public_non_eas` feed paths.
 - Parses CAP 1.2 XML alerts from the IPAWS feed.
+- Extracts `<polygon>` and `<circle>` geometry, computes the centroid, and
+  reverse-geocodes to a human-readable landmark (e.g. "near Wickenburg, AZ"
+  instead of just "Maricopa County").
 - Sends concise Meshtastic text messages over serial or TCP.
 - Tracks sent alert IDs in a local JSON state file to avoid duplicate broadcasts.
 - Optional filters for SAME codes, UGC codes, event codes, and severity.
@@ -175,6 +178,39 @@ IPAWS_FILTER_EVENT_CODES=TOR
 
 Multiple values are comma-separated. Filters are combined, so if more than one
 filter type is set an alert must match all configured filter groups.
+
+## Location Resolution
+
+CAP alerts often include a `<polygon>` or `<circle>` element describing the
+precise affected area. The script extracts that geometry, computes the
+centroid, and reverse-geocodes it to a human-readable landmark using the
+OpenStreetMap Nominatim API. The result is added to the broadcast message as a
+`Location:` line, e.g.:
+
+```text
+Location: near Wickenburg, AZ
+Area: Maricopa County
+```
+
+Configuration:
+
+```ini
+IPAWS_GEOCODE_ENABLED=true
+IPAWS_GEOCODE_URL=https://nominatim.openstreetmap.org/reverse
+IPAWS_GEOCODE_USER_AGENT=ipaws-meshtastic/1.0 (contact: you@example.com)
+IPAWS_GEOCODE_ZOOM=14
+IPAWS_GEOCODE_TIMEOUT_SECONDS=10
+IPAWS_GEOCODE_CACHE_SIZE=500
+```
+
+Set a contact address in `IPAWS_GEOCODE_USER_AGENT` — Nominatim's usage policy
+requires identifiable User-Agents. Reverse lookups are cached in the state
+file by rounded coordinates, so repeat polygons over the same area incur no
+extra requests.
+
+If the centroid falls in an unpopulated area, the label falls back to the
+containing county (e.g. `in Yavapai County, AZ`). If geocoding is disabled or
+fails, the label falls back to raw coordinates.
 
 ## IPAWS Notes
 
