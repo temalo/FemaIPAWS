@@ -455,19 +455,33 @@ def format_alert_message(alert: Alert, config: Config, location_label: str = "")
     summary = first_parameter(alert, "CMAMtext") or first_parameter(alert, "CMAMlongtext")
     summary = summary or alert.headline or alert.description or alert.event
 
-    details = [
-        f"Event: {alert.event}",
-        f"Headline: {alert.headline}",
-        f"Description: {alert.description}",
-        f"Instructions: {alert.instruction}",
-        f"Location: {location_label}",
-        f"Area: {alert.area}",
-        f"Severity: {alert.severity}",
-        f"Urgency: {alert.urgency}",
-        f"Certainty: {alert.certainty}",
-    ]
-    details = [d for d in details if d.split(': ', 1)[1]]
-    message = f"{config.message_prefix} ALERT\n" + "\n".join(details)
+    details = [f"{config.message_prefix} ALERT: {alert.event}."]
+    if summary and summary.lower() != alert.event.lower():
+        details.append(summary.rstrip(".") + ".")
+    if (
+        alert.description
+        and alert.description.strip()
+        and alert.description.strip().lower() != summary.strip().lower()
+    ):
+        details.append(alert.description.rstrip(".") + ".")
+
+    if alert.severity and alert.certainty:
+        details.append(f"{alert.severity.capitalize()} severity with {alert.certainty.lower()} certainty.")
+    elif alert.severity:
+        details.append(f"{alert.severity.capitalize()} severity.")
+    elif alert.certainty:
+        details.append(f"{alert.certainty.capitalize()} certainty.")
+
+    if alert.urgency:
+        details.append(f"{alert.urgency.capitalize()} urgency.")
+    if location_label:
+        details.append(f"Near {location_label}.")
+    if alert.area:
+        details.append(f"For {alert.area}.")
+    if alert.instruction:
+        details.append(alert.instruction.rstrip(".") + ".")
+
+    message = " ".join(details)
     message = ascii_clean(message)
     return message
 
@@ -595,6 +609,55 @@ def truncate(value: str, max_length: int) -> str:
     return value[: max_length - 3].rstrip() + "..."
 
 
+def split_into_chunks(message: str, max_length: int) -> list[str]:
+    if not message:
+        return []
+    if max_length <= 0:
+        raise ValueError("MESHTASTIC_MAX_MESSAGE_LENGTH must be greater than zero.")
+
+    def wrap_words(text: str, limit: int) -> list[str]:
+        if limit <= 0:
+            raise ValueError("Chunk length limit must be greater than zero.")
+        words = text.split()
+        if not words:
+            return [""]
+        chunks: list[str] = []
+        current = ""
+        for word in words:
+            if not current:
+                while len(word) > limit:
+                    chunks.append(word[:limit])
+                    word = word[limit:]
+                current = word
+                continue
+            candidate = f"{current} {word}"
+            if len(candidate) <= limit:
+                current = candidate
+                continue
+            chunks.append(current)
+            while len(word) > limit:
+                chunks.append(word[:limit])
+                word = word[limit:]
+            current = word
+        if current:
+            chunks.append(current)
+        return chunks
+
+    chunk_count = 1
+    while True:
+        prefix_len = len(f"[{chunk_count}/{chunk_count}] ")
+        body_limit = max_length - prefix_len
+        if body_limit <= 0:
+            raise ValueError(
+                "MESHTASTIC_MAX_MESSAGE_LENGTH is too small for message numbering prefix."
+            )
+        wrapped = wrap_words(message, body_limit)
+        next_count = len(wrapped)
+        if next_count == chunk_count:
+            return [f"[{idx}/{next_count}] {chunk}" for idx, chunk in enumerate(wrapped, start=1)]
+        chunk_count = next_count
+
+
 def send_messages(messages: list[str], config: Config) -> bool:
     if not messages:
         logging.info("No new matching IPAWS alerts to send.")
@@ -604,8 +667,10 @@ def send_messages(messages: list[str], config: Config) -> bool:
         print("\nTEST MODE - Messages NOT sent to Meshtastic")
         print(f"Channel: {config.channel}")
         for index, message in enumerate(messages, start=1):
-            print(f"\nMessage {index} ({len(message)} chars):")
-            print(message)
+            chunks = split_into_chunks(message, config.max_message_length)
+            print(f"\nMessage {index} ({len(message)} chars, {len(chunks)} chunk(s)):")
+            for chunk in chunks:
+                print(chunk)
         return True
 
     interface = None
@@ -621,8 +686,7 @@ def send_messages(messages: list[str], config: Config) -> bool:
             interface = meshtastic.serial_interface.SerialInterface(devPath=config.serial_port)
 
         for index, message in enumerate(messages, start=1):
-            # Split long messages into chunks
-            chunks = [message[i:i+config.max_message_length] for i in range(0, len(message), config.max_message_length)]
+            chunks = split_into_chunks(message, config.max_message_length)
             for chunk_idx, chunk in enumerate(chunks, start=1):
                 logging.info(
                     "Sending alert %s/%s (chunk %s/%s) to channel %s",

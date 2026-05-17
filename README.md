@@ -15,6 +15,8 @@ configuration, serial/TCP Meshtastic support, and a dry-run mode for testing.
   reverse-geocodes to a human-readable landmark (e.g. "near Wickenburg, AZ"
   instead of just "Maricopa County").
 - Sends concise Meshtastic text messages over serial or TCP.
+- Uses word-aware chunking with `[n/N]` numbering for multi-part messages to
+  improve readability on small screens.
 - Tracks sent alert IDs in a local JSON state file to avoid duplicate broadcasts.
 - Optional filters for SAME codes, UGC codes, event codes, and severity.
 - Designed for Linux cron usage.
