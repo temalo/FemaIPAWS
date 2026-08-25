@@ -115,8 +115,10 @@ class Config:
     send_delay_seconds: float = 2.0
     connection_type: str = "serial"
     serial_port: str = "/dev/ttyUSB0"
-    tcp_host: str = "192.168.1.100"
-    channel: int = 0
+    tcp_host: str = "192.168.1.100",
+    tcp_port: int = 4403,
+    channel: int = 0,
+    hop_limit: int = 3,
     send_enabled: bool = True
     geocode_enabled: bool = True
     geocode_url: str = "https://nominatim.openstreetmap.org/reverse"
@@ -174,7 +176,9 @@ def load_config() -> Config:
         connection_type=os.getenv("MESHTASTIC_CONNECTION_TYPE", "serial").lower(),
         serial_port=os.getenv("MESHTASTIC_SERIAL_PORT", "/dev/ttyUSB0"),
         tcp_host=os.getenv("MESHTASTIC_TCP_HOST", "192.168.1.100"),
+        tcp_port=os.getenv("MESHTASTIC_TCP_PORT", 4403),
         channel=int(os.getenv("MESHTASTIC_CHANNEL", "0")),
+        hop_limit=int(os.getenv("MESHTASTIC_HOP_LIMIT", 3)),
         send_enabled=os.getenv("MESHTASTIC_SEND_ENABLED", "true").lower() == "true",
         geocode_enabled=os.getenv("IPAWS_GEOCODE_ENABLED", "true").lower() == "true",
         geocode_url=os.getenv("IPAWS_GEOCODE_URL", "https://nominatim.openstreetmap.org/reverse"),
@@ -679,8 +683,8 @@ def send_messages(messages: list[str], config: Config) -> bool:
         import meshtastic.tcp_interface
 
         if config.connection_type == "tcp":
-            logging.info("Connecting to Meshtastic via TCP: %s", config.tcp_host)
-            interface = meshtastic.tcp_interface.TCPInterface(hostname=config.tcp_host)
+            logging.info("Connecting to Meshtastic via TCP: %s on port %s", config.tcp_host, config.tcp_port)
+            interface = meshtastic.tcp_interface.TCPInterface(hostname=config.tcp_host, portNumber=config.tcp_port)
         else:
             logging.info("Connecting to Meshtastic via serial: %s", config.serial_port)
             interface = meshtastic.serial_interface.SerialInterface(devPath=config.serial_port)
@@ -692,7 +696,7 @@ def send_messages(messages: list[str], config: Config) -> bool:
                     "Sending alert %s/%s (chunk %s/%s) to channel %s",
                     index, len(messages), chunk_idx, len(chunks), config.channel
                 )
-                interface.sendText(chunk, channelIndex=config.channel)
+                interface.sendText(chunk, channelIndex=config.channel, hopLimit=config.hop_limit)
                 if chunk_idx < len(chunks):
                     time.sleep(config.send_delay_seconds)
             if index < len(messages):
@@ -716,6 +720,9 @@ def main() -> int:
     )
 
     config = load_config()
+    if config.hop_limit < 0 or config.hop_limit > 7:
+        logging.info("Config hop_limit is out of range, %d does not fall within the acceptable range of 0 to 7 hop count range. Defaulting to 3", config.hop_limit)
+        config.hop_limit = 3
     logging.info("IPAWS alerts -> Meshtastic")
     logging.info("Feed: %s/%s", config.ipaws_environment, config.ipaws_feed)
     logging.info("Send to Meshtastic: %s", "enabled" if config.send_enabled else "disabled")
